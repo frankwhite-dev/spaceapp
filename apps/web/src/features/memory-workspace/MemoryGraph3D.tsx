@@ -141,14 +141,13 @@ function MemoryGraph3DGL(props: MemoryGraph3DProps & { onUnavailable: () => void
     if (renderer) {
       // Node/edge buffers are rebuilt only when the graph topology or the
       // set of positioned nodes changes; streamed layout updates just
-      // re-upload the position texture.
+      // re-upload the position texture. A presentCount change must rebuild
+      // the node buffers too: setGraph bakes each node's presence into its
+      // radius (0 = hidden), and setEdges alone would leave stale radii.
       const previous = topologyRef.current;
       const presentCount = coordinates.size;
-      if (!previous || previous.nodes !== nodes || previous.edges !== edges || previous.positions !== positions) {
+      if (!previous || previous.nodes !== nodes || previous.edges !== edges || previous.positions !== positions || previous.presentCount !== presentCount) {
         renderer.setGraph(graphData.glNodes, graphData.glEdges);
-        focusKeyRef.current = "";
-      } else if (previous.presentCount !== presentCount) {
-        renderer.setEdges(graphData.glEdges);
         focusKeyRef.current = "";
       }
       topologyRef.current = { nodes, edges, positions, presentCount };
@@ -210,7 +209,13 @@ function MemoryGraph3DGL(props: MemoryGraph3DProps & { onUnavailable: () => void
         const emit = function* (index: number) {
           if (seen.has(index)) return;
           seen.add(index);
+          // Nodes without coordinates project to the origin; never label them.
+          if (!data!.glNodes[index]!.present) return;
           const node = current.current.nodes[index]!;
+          // Check eligibility before projecting: the projection is the
+          // expensive part, and at low zoom every MEMORY node is ineligible.
+          const eligible = node.type === "SOURCE" || node.id === focusId || camera.zoom >= 1.6;
+          if (!eligible) return;
           const projected = projectMemoryPoint({ x: flat[index * 3]!, y: flat[index * 3 + 1]!, z: flat[index * 3 + 2]! }, camera, scale, width, height);
           yield {
             id: node.id,
@@ -218,7 +223,7 @@ function MemoryGraph3DGL(props: MemoryGraph3DProps & { onUnavailable: () => void
             x: projected.x,
             y: projected.y,
             core: isMemoryCoreLabel(node.label),
-            eligible: node.type === "SOURCE" || node.id === focusId || camera.zoom >= 1.6
+            eligible
           };
         };
         if (focusId) {
@@ -314,15 +319,20 @@ function MemoryGraph3DGL(props: MemoryGraph3DProps & { onUnavailable: () => void
     const onContextLost = (event: Event) => { event.preventDefault(); setContextLost(true); };
     const onContextRestored = () => {
       const restored = MemoryGraphGLRenderer.tryCreate(canvas);
-      if (restored) {
-        rendererRef.current = restored;
-        if (graphDataRef.current) {
-          restored.setGraph(graphDataRef.current.glNodes, graphDataRef.current.glEdges);
-          restored.updatePositions(graphDataRef.current.flatPositions);
-          topologyRef.current = { nodes: current.current.nodes, edges: current.current.edges, positions: current.current.positions, presentCount: current.current.coordinates.size };
-          focusKeyRef.current = "";
-          applyFocus();
-        }
+      if (!restored) {
+        // Restoration failed: fall back to the Canvas 2D renderer instead of
+        // showing a blank, non-interactive surface backed by a dead context.
+        rendererRef.current = null;
+        onUnavailable();
+        return;
+      }
+      rendererRef.current = restored;
+      if (graphDataRef.current) {
+        restored.setGraph(graphDataRef.current.glNodes, graphDataRef.current.glEdges);
+        restored.updatePositions(graphDataRef.current.flatPositions);
+        topologyRef.current = { nodes: current.current.nodes, edges: current.current.edges, positions: current.current.positions, presentCount: current.current.coordinates.size };
+        focusKeyRef.current = "";
+        applyFocus();
       }
       setContextLost(false);
       schedule();
@@ -335,7 +345,10 @@ function MemoryGraph3DGL(props: MemoryGraph3DProps & { onUnavailable: () => void
       canvas.removeEventListener("pointerdown", down); canvas.removeEventListener("pointermove", move); canvas.removeEventListener("pointerup", up); canvas.removeEventListener("pointercancel", cancel); canvas.removeEventListener("wheel", wheel); canvas.removeEventListener("keydown", key);
       canvas.removeEventListener("webglcontextlost", onContextLost); canvas.removeEventListener("webglcontextrestored", onContextRestored);
       renderer.dispose();
-      if (rendererRef.current === renderer) rendererRef.current = null;
+      // A context restore may have swapped in a second renderer; dispose it
+      // too instead of leaking it.
+      if (rendererRef.current && rendererRef.current !== renderer) rendererRef.current.dispose();
+      rendererRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

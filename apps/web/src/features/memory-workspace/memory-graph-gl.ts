@@ -94,11 +94,11 @@ precision highp float;
 precision highp int;
 ${PROJECTION_GLSL}
 uniform float uPickMode;
-in vec2 aCorner;
-in vec3 aColor;
-in float aRadius;
-in float aGlow;
-in float aState;
+layout(location = 0) in vec2 aCorner;
+layout(location = 1) in vec3 aColor;
+layout(location = 2) in float aRadius;
+layout(location = 3) in float aGlow;
+layout(location = 4) in float aState;
 out vec3 vColor;
 out vec2 vLocal;
 out float vAlpha;
@@ -162,9 +162,9 @@ const EDGE_VERTEX_GLSL = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
 ${PROJECTION_GLSL}
-in float aIndex;
-in vec3 aColor;
-in float aState;
+layout(location = 0) in float aIndex;
+layout(location = 1) in vec3 aColor;
+layout(location = 2) in float aState;
 out vec3 vColor;
 
 void main() {
@@ -201,6 +201,8 @@ export class MemoryGraphGLRenderer {
   private edgeProgram: ProgramInfo;
   private nodeVao: WebGLVertexArrayObject | null = null;
   private edgeVao: WebGLVertexArrayObject | null = null;
+  private nodeBuffers: WebGLBuffer[] = [];
+  private edgeBuffers: WebGLBuffer[] = [];
   private positionTexture: WebGLTexture | null = null;
   private positionData = new Float32Array(0);
   private positionTexWidth = 1;
@@ -284,11 +286,17 @@ export class MemoryGraphGLRenderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.positionTexWidth, texHeight, 0, gl.RGBA, gl.FLOAT, this.positionData);
 
     // Node VAO: static quad corners plus one instanced attribute set per node.
+    // Deleting the VAO does not free its buffers, so drop the previous
+    // generation explicitly before rebuilding.
     if (this.nodeVao) gl.deleteVertexArray(this.nodeVao);
+    for (const handle of this.nodeBuffers) gl.deleteBuffer(handle);
+    this.nodeBuffers = [];
     this.nodeVao = gl.createVertexArray();
     gl.bindVertexArray(this.nodeVao);
     const corners = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer(corners, gl.STATIC_DRAW));
+    const cornersBuffer = this.buffer(corners, gl.STATIC_DRAW);
+    this.nodeBuffers.push(cornersBuffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, cornersBuffer);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     const colors = new Float32Array(nodes.length * 3);
@@ -302,6 +310,7 @@ export class MemoryGraphGLRenderer {
     });
     const bindInstanced = (location: number, size: number, data: Float32Array<ArrayBuffer>, usage: number) => {
       const handle = this.buffer(data, usage);
+      this.nodeBuffers.push(handle);
       gl.enableVertexAttribArray(location);
       gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
       gl.vertexAttribDivisor(location, 1);
@@ -319,6 +328,10 @@ export class MemoryGraphGLRenderer {
   /** Rebuilds only the edge buffers (e.g. when the positioned set changes). */
   setEdges(edges: MemoryGraphGLEdgeInput[]): void {
     const gl = this.gl;
+    // The edge VAO is reused across rebuilds, so its old buffers must be
+    // deleted explicitly; deleting the VAO would not free them either.
+    for (const handle of this.edgeBuffers) gl.deleteBuffer(handle);
+    this.edgeBuffers = [];
     // Edge VAO: two vertices per edge, endpoint indices into the position texture.
     if (!this.edgeVao) this.edgeVao = gl.createVertexArray();
     gl.bindVertexArray(this.edgeVao);
@@ -338,6 +351,7 @@ export class MemoryGraphGLRenderer {
     this.edgeVertexCount = edges.length * 2;
     const bindEdge = (location: number, size: number, data: Float32Array<ArrayBuffer>, usage: number) => {
       const handle = this.buffer(data, usage);
+      this.edgeBuffers.push(handle);
       gl.enableVertexAttribArray(location);
       gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
       return handle;
@@ -492,6 +506,10 @@ export class MemoryGraphGLRenderer {
     if (this.pickFramebuffer) gl.deleteFramebuffer(this.pickFramebuffer);
     if (this.nodeVao) gl.deleteVertexArray(this.nodeVao);
     if (this.edgeVao) gl.deleteVertexArray(this.edgeVao);
+    for (const handle of this.nodeBuffers) gl.deleteBuffer(handle);
+    this.nodeBuffers = [];
+    for (const handle of this.edgeBuffers) gl.deleteBuffer(handle);
+    this.edgeBuffers = [];
     gl.deleteProgram(this.nodeProgram.program);
     gl.deleteProgram(this.edgeProgram.program);
   }
